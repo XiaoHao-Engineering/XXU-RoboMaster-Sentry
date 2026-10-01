@@ -1,0 +1,11 @@
+/build/
+/Debug/
+/.idea/
+*.bak
+*.launch
+*.cproject
+*.project
+# .settings/ 不要忽略：里面是 ST 调试要用的工程元数据
+
+# 调试日志（每次调试都会重新生成）
+gdbClient_log.txt
