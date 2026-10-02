@@ -16,6 +16,19 @@ static float s_wheel_kp = CHASSIS_SPEED_KP;
 static float s_wheel_ki = CHASSIS_SPEED_KI;
 static float s_wheel_kd = CHASSIS_SPEED_KD;
 
+/* 自转方向校正（在线可调） */
+static float s_omega_dir = CHASSIS_OMEGA_DIR;
+
+/* 单轮测试：0=正常，1~4=只驱动对应轮子，负值反转 */
+static float s_test_wheel = 0.0f;
+static float s_test_rpm    = 500.0f;
+
+/* 轮子方向（在线可调，填 1 或 -1） */
+static float s_rev_fl = CHASSIS_REV_FL;
+static float s_rev_fr = CHASSIS_REV_FR;
+static float s_rev_rl = CHASSIS_REV_RL;
+static float s_rev_rr = CHASSIS_REV_RR;
+
 static Chassis*       s_chassis = NULL;
 static DBUS_DRIVES*   s_dbus = NULL;
 static PID_Controller s_heading_pid = {0};
@@ -26,6 +39,9 @@ static Chassis_HeadingSource s_heading_src = ChassisControl_NoHeading;
 
 /* 私有函数声明 */
 static void  Chassis_Apply_Wheel_Gain(void);
+static void  Chassis_Apply_Reverse(void);
+static int16_t RC_Channel(uint8_t ch);
+static float Chassis_Spin_Omega(void);
 static float Stick(int16_t value);
 static float Heading(void);
 static void  Heading_Pid_Reset(void);
@@ -45,6 +61,38 @@ static void Chassis_Apply_Wheel_Gain(void) {
         pids[i]->ki = s_wheel_ki;
         pids[i]->kd = s_wheel_kd;
     }
+}
+
+/* 把在线调的轮子方向写进底盘对象 */
+static void Chassis_Apply_Reverse(void) {
+    if (s_chassis == NULL) {
+        return;
+    }
+    /* 0=左前 1=右前 2=左后 3=右后 */
+    s_chassis->reverse[0] = (s_rev_fl < 0.0f) ? -1 : 1;
+    s_chassis->reverse[1] = (s_rev_fr < 0.0f) ? -1 : 1;
+    s_chassis->reverse[2] = (s_rev_rl < 0.0f) ? -1 : 1;
+    s_chassis->reverse[3] = (s_rev_rr < 0.0f) ? -1 : 1;
+}
+
+/* 取 DBUS 指定通道 */
+static int16_t RC_Channel(const uint8_t ch) {
+    switch (ch) {
+        case 0:  return s_dbus->ch0;
+        case 1:  return s_dbus->ch1;
+        case 2:  return s_dbus->ch2;
+        case 3:  return s_dbus->ch3;
+        default: return 0;
+    }
+}
+
+/* 原地旋转量：手动模式右摇杆比例给定，小陀螺模式恒定转速 */
+static float Chassis_Spin_Omega(void) {
+    if (s_mode == CHASSIS_MODE_SPIN) {
+        /* 方向由左手水平决定，不推默认逆时针 */
+        return (RC_Channel(CHASSIS_SPIN_DIR_CH) < 0) ? -s_spin_w : s_spin_w;
+    }
+    return Stick(RC_Channel(CHASSIS_RC_W_CH)) * CHASSIS_MAX_W;
 }
 
 static float Stick(const int16_t value) {
@@ -73,6 +121,7 @@ void ChassisControl_Init(Chassis* chassis, DBUS_DRIVES* dbus) {
 
     Heading_Pid_Reset();
     Chassis_Apply_Wheel_Gain();
+    Chassis_Apply_Reverse();
 }
 
 void ChassisControl_Set_HeadingSource(Chassis_HeadingSource source) {
@@ -99,6 +148,20 @@ void ChassisControl_Update(void) {
         return;
     }
 
+    /* 单轮测试模式 */
+    if (s_test_wheel != 0.0f) {
+        const int idx = (int)s_test_wheel;
+        const int wheel = ((idx > 0) ? idx : -idx) - 1;   /* 0=左前 1=右前 2=左后 3=右后 */
+        const float dir = (idx > 0) ? 1.0f : -1.0f;
+
+        for (int i = 0; i < 4; i++) {
+            s_chassis->wheel[i]->Set_Power_Limit(s_chassis->wheel[i], s_chassis->power_limit);
+            s_chassis->wheel[i]->Set_Motor_State(s_chassis->wheel[i],
+                                                 (i == wheel) ? dir * s_test_rpm : 0.0f);
+        }
+        return;
+    }
+
     /* 拨杆切模式：上=跟随 中=手动 下=小陀螺 */
     if (s_dbus->sw1 != s_prev_sw1) {
         if (s_dbus->sw1 == 1) {
@@ -112,13 +175,9 @@ void ChassisControl_Update(void) {
         s_prev_sw1 = s_dbus->sw1;
     }
 
-    /* 摇杆 -> 参考系目标速度 */
-    const float vx =  Stick(s_dbus->ch3) * CHASSIS_MAX_VX;
-#if GIMBAL_RC_ENABLE
-    const float vy = 0.0f;                                  /* ch0 让给云台 yaw */
-#else
-    const float vy = -Stick(s_dbus->ch0) * CHASSIS_MAX_VY;
-#endif
+    /* 左摇杆 -> 平移（右推右移） */
+    const float vx =  Stick(RC_Channel(CHASSIS_RC_VX_CH)) * CHASSIS_MAX_VX;
+    const float vy = -Stick(RC_Channel(CHASSIS_RC_VY_CH)) * CHASSIS_MAX_VY;
 
     float vx_body = vx;
     float vy_body = vy;
@@ -134,27 +193,20 @@ void ChassisControl_Update(void) {
 
     float omega = 0.0f;
 
-    switch (s_mode) {
-        case CHASSIS_MODE_SPIN:
-            /* 自转方向由 ch2 决定，速度固定 */
-            omega = (s_dbus->ch2 < 0) ? -s_spin_w : s_spin_w;
-            break;
-
-        case CHASSIS_MODE_FOLLOW: {
-            /* 目标：夹角 theta -> 0。误差取 theta 本身，输出即为 +Kp*theta */
-            s_heading_pid.kp = s_head_kp;
-            s_heading_pid.ki = s_head_ki;
-            s_heading_pid.kd = s_head_kd;
-            PID_Set_Target(&s_heading_pid, Heading());
-            omega = PID_Calculate(&s_heading_pid, 0.0f, 0.0f);
-            break;
-        }
-
-        case CHASSIS_MODE_MANUAL:
-        default:
-            omega = Stick(s_dbus->ch2) * CHASSIS_MAX_W;
-            break;
+    if (s_mode == CHASSIS_MODE_FOLLOW) {
+        /* 航向 PID：夹角 theta -> 0 */
+        s_heading_pid.kp = s_head_kp;
+        s_heading_pid.ki = s_head_ki;
+        s_heading_pid.kd = s_head_kd;
+        PID_Set_Target(&s_heading_pid, Heading());
+        omega = PID_Calculate(&s_heading_pid, 0.0f, 0.0f);
+    } else {
+        /* 手动 = 右摇杆比例旋转；小陀螺 = 恒定转速 */
+        omega = Chassis_Spin_Omega();
     }
+
+    /* 自转方向校正 */
+    omega *= s_omega_dir;
 
     Chassis_Set_Velocity(s_chassis, vx_body, vy_body, omega);
     Chassis_Update(s_chassis);
@@ -184,7 +236,11 @@ void ChassisControl_JScopeCallback(void* arg) {
 /* ---- 在线调参变量表 ---- */
 
 static const SERIALPLOT_VAR chassis_tunable[] = {
+    /* 单轮测试 */
+    {"test_wheel", &s_test_wheel, -4.0f, 4.0f,   NULL},
+    {"test_rpm",   &s_test_rpm,    0.0f, 3000.0f, NULL},
     {"spin_w",   &s_spin_w,   0.0f,  20.0f,  NULL},
+    {"omega_dir",&s_omega_dir,-1.0f,   1.0f,  NULL},
     {"dead",     &s_dead,     0.0f, 100.0f,  NULL},
     {"head_kp",  &s_head_kp,  0.0f, 100.0f,  NULL},
     {"head_ki",  &s_head_ki,  0.0f,  10.0f,  NULL},
@@ -192,6 +248,11 @@ static const SERIALPLOT_VAR chassis_tunable[] = {
     {"wheel_kp", &s_wheel_kp, 0.0f, 100.0f,  Chassis_Apply_Wheel_Gain},
     {"wheel_ki", &s_wheel_ki, 0.0f,  10.0f,  Chassis_Apply_Wheel_Gain},
     {"wheel_kd", &s_wheel_kd, 0.0f,  10.0f,  Chassis_Apply_Wheel_Gain},
+    /* 轮子方向标定 */
+    {"rev_fl",   &s_rev_fl,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
+    {"rev_fr",   &s_rev_fr,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
+    {"rev_rl",   &s_rev_rl,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
+    {"rev_rr",   &s_rev_rr,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
 };
 
 const SERIALPLOT_VAR* ChassisControl_Get_Tunable(uint8_t* count) {

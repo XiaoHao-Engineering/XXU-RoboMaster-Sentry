@@ -14,6 +14,8 @@ typedef struct {
     float   power_limit;     /* 单轮功率上限 W */
     float   vx, vy, omega;   /* 目标速度 */
     float   speed[4];        /* 各轮目标线速度 m/s */
+    float   rpm[4];          /* 各轮目标转子转速 RPM */
+    float   rpm_fdb[4];      /* 各轮实际转子转速 RPM */
 } Chassis;
 
 void Chassis_Init(Chassis* c,

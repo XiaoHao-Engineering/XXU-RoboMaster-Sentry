@@ -25,6 +25,8 @@ void Chassis_Init(Chassis* c,
     c->vx = c->vy = c->omega = 0.0f;
     for (int i = 0; i < 4; i++) {
         c->speed[i] = 0.0f;
+        c->rpm[i] = 0.0f;
+        c->rpm_fdb[i] = 0.0f;
     }
 }
 
@@ -46,9 +48,11 @@ void Chassis_Update(Chassis* c) {
 
     for (int i = 0; i < 4; i++) {
         /* 轮线速度 m/s -> 转子 RPM */
-        const float rpm = RAD_TO_RPM(c->speed[i] / c->wheel_r) * c->ratio;
+        c->rpm[i] = RAD_TO_RPM(c->speed[i] / c->wheel_r) * c->ratio * (float)c->reverse[i];
+        c->rpm_fdb[i] = c->wheel[i]->Get_Motor_Speed(c->wheel[i]);
+
         c->wheel[i]->Set_Power_Limit(c->wheel[i], c->power_limit);
-        c->wheel[i]->Set_Motor_State(c->wheel[i], rpm * (float)c->reverse[i]);
+        c->wheel[i]->Set_Motor_State(c->wheel[i], c->rpm[i]);
     }
 }
 

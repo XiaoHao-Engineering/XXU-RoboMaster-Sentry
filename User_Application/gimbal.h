@@ -11,9 +11,7 @@
 #define GIMBAL_YAW_ZERO_DEG     (0.0f)       /* 云台正对底盘前方时的电机多圈角度 */
 #define GIMBAL_YAW_DIR          (1.0f)       /* 角度增大方向：+1 或 -1 现场核对 */
 
-/* GM6020 电流帧量程 ±3000，框架会用 power_limit 再夹一次，
-   90W 刚好对应满量程，改小会限制云台出力 */
-#define GIMBAL_YAW_POWER_LIMIT  (90.0f)
+#define GIMBAL_YAW_POWER_LIMIT  (90.0f)      /* 90W 对应 GM6020 电流满量程 */
 
 #define GIMBAL_YAW_KP           (25.0f)
 #define GIMBAL_YAW_KI           (0.0f)
@@ -21,8 +19,7 @@
 #define GIMBAL_YAW_MAX_OUT      (3000.0f)    /* GM6020 电流帧量程 */
 #define GIMBAL_YAW_MAX_IOUT     (1000.0f)
 
-/* 云台 yaw 是否由遥控器 ch0（右手水平）控制。开了以后底盘就不再用 ch0 平移 */
-#define GIMBAL_RC_ENABLE        (1)
+#define GIMBAL_RC_ENABLE        (0)          /* ch0 给了底盘自转，云台遥控暂关 */
 #define GIMBAL_RC_RANGE         (180.0f)     /* 满杆对应的角度 deg */
 #define GIMBAL_RC_DEAD          (10)
 

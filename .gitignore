@@ -9,3 +9,7 @@
 
 # 调试日志（每次调试都会重新生成）
 gdbClient_log.txt
+
+# Python
+__pycache__/
+*.pyc

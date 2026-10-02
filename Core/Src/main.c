@@ -83,8 +83,7 @@ static void MX_SPI5_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* 航向源 = 云台相对底盘的角度，由 GM6020 的绝对编码器给出。
-   小陀螺走直线和跟随都靠它。要换别的角度源只改这个函数。 */
+  /* 航向源：云台相对底盘的角度（GM6020 绝对编码器） */
 static float Chassis_Heading_Get(void) {
     return Gimbal_Get_Yaw(&user_gimbal);
 }
@@ -134,7 +133,7 @@ int main(void)
   TIMER_Init(&user_timer_2, &htim2, APB1_TIM_CLK);
   TIMER_RegisterCallback(&user_timer_2, ChassisControl_JScopeCallback);
 
-  /* USART3 接姿态传感器（USART6 已在 CubeMX 里删除）*/
+  /* USART3 接姿态传感器 */
   UART_Init(&user_imu_uart, &huart3);
 
   /* 状态灯 */
@@ -152,7 +151,8 @@ int main(void)
   CAN_Init(&user_can_1, &hcan1);
   CAN_Init(&user_can_2, &hcan2);
 
-  /* 底盘电机：4 个 M3508 用 ID 1~4，共用 0x200 帧 */
+  /* 底盘电机：4 个 M3508 共用 0x200 帧
+     ID 按实际接线：左前=2  右前=3  左后=1  右后=4 */
   PID_Init(&user_wheel_pid_fl, CHASSIS_SPEED_KP, CHASSIS_SPEED_KI, CHASSIS_SPEED_KD,
            CHASSIS_SPEED_MAX_OUT, CHASSIS_SPEED_MAX_IOUT);
   PID_Init(&user_wheel_pid_fr, CHASSIS_SPEED_KP, CHASSIS_SPEED_KI, CHASSIS_SPEED_KD,
@@ -162,11 +162,11 @@ int main(void)
   PID_Init(&user_wheel_pid_rr, CHASSIS_SPEED_KP, CHASSIS_SPEED_KI, CHASSIS_SPEED_KD,
            CHASSIS_SPEED_MAX_OUT, CHASSIS_SPEED_MAX_IOUT);
 
-  DJI_Motor_Init(&user_wheel_fl, &user_can_1, 1, 0.0f, M3508_gear, Rotor_speed,
+  DJI_Motor_Init(&user_wheel_fl, &user_can_1, 2, 0.0f, M3508_gear, Rotor_speed,
                  (CONTROLLER_INTERFACE*)&user_wheel_pid_fl);
-  DJI_Motor_Init(&user_wheel_fr, &user_can_1, 2, 0.0f, M3508_gear, Rotor_speed,
+  DJI_Motor_Init(&user_wheel_fr, &user_can_1, 3, 0.0f, M3508_gear, Rotor_speed,
                  (CONTROLLER_INTERFACE*)&user_wheel_pid_fr);
-  DJI_Motor_Init(&user_wheel_rl, &user_can_1, 3, 0.0f, M3508_gear, Rotor_speed,
+  DJI_Motor_Init(&user_wheel_rl, &user_can_1, 1, 0.0f, M3508_gear, Rotor_speed,
                  (CONTROLLER_INTERFACE*)&user_wheel_pid_rl);
   DJI_Motor_Init(&user_wheel_rr, &user_can_1, 4, 0.0f, M3508_gear, Rotor_speed,
                  (CONTROLLER_INTERFACE*)&user_wheel_pid_rr);
@@ -191,8 +191,17 @@ int main(void)
   Serialplot_Init(&user_serialplot, &user_serialplot_uart,
                   ChassisControl_Get_Tunable(&tunable_num), tunable_num,
                   CHASSIS_SERIALPLOT_PERIOD_MS);
+#if CHASSIS_SERIALPLOT_MOTOR
+  /* 4 轮目标 / 反馈转子转速 */
+  Serialplot_Set_Data(&user_serialplot, 8,
+                      &user_chassis.rpm[0], &user_chassis.rpm_fdb[0],
+                      &user_chassis.rpm[1], &user_chassis.rpm_fdb[1],
+                      &user_chassis.rpm[2], &user_chassis.rpm_fdb[2],
+                      &user_chassis.rpm[3], &user_chassis.rpm_fdb[3]);
+#else
   Serialplot_Set_Data(&user_serialplot, 4, &user_attitude.yaw, &user_attitude.pitch,
                       &user_chassis.omega, &user_chassis.vx);
+#endif
 
   /* 云台 yaw：GM6020，绝对编码器提供云台相对底盘的角度 */
   PID_Init(&user_gimbal_yaw_pid, GIMBAL_YAW_KP, GIMBAL_YAW_KI, GIMBAL_YAW_KD,
@@ -205,7 +214,7 @@ int main(void)
   /* 底盘控制任务 1kHz */
   ChassisControl_Init(&user_chassis, &user_dbus);
 
-  /* 挂航向源：小陀螺走直线 / 跟随都靠它 */
+  /* 挂航向源 */
   ChassisControl_Set_HeadingSource(Chassis_Heading_Get);
   SysTick_InitTask(&chassis_task, NULL, CHASSIS_PERIOD_MS, CHASSIS_PERIOD_MS,
                    Task_REPEAT, ChassisControl_Task);
