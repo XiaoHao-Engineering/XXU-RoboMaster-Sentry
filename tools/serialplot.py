@@ -29,9 +29,13 @@ BAUD     = 115200
 MAX_PTS  = 500          # 每条曲线保留的点数
 
 # 8 通道的名字（改这里就行）
-NAMES = ["FL tgt", "FL fdb", "FR tgt", "FR fdb",
-         "RL tgt", "RL fdb", "RR tgt", "RR fdb"]
-# 若固件里 CHASSIS_SERIALPLOT_MOTOR = 0，改成 4 通道：
+# 通道名要和固件里的 CHASSIS_SERIALPLOT_MODE 对应
+#   MODE=2 云台 yaw 调试（4 通道）
+NAMES = ["gyaw", "gtgt", "graw", "gspd"]
+#   MODE=1 底盘 4 轮转速（8 通道）
+# NAMES = ["FL tgt", "FL fdb", "FR tgt", "FR fdb",
+#          "RL tgt", "RL fdb", "RR tgt", "RR fdb"]
+#   MODE=0 姿态（4 通道）
 # NAMES = ["yaw", "pitch", "omega", "vx"]
 
 

@@ -87,6 +87,14 @@ static void MX_SPI5_Init(void);
 static float Chassis_Heading_Get(void) {
     return Gimbal_Get_Yaw(&user_gimbal);
 }
+
+/* 航向源可信度：
+     云台从没接过 -> 可信（裸车调试，角度恒为 0，小陀螺照常能用）
+     接过又掉线   -> 不可信（角度冻结，禁止自转）
+     在线未对齐   -> 不可信 */
+static uint8_t Chassis_Source_Valid(void) {
+    return Gimbal_Is_Reliable(&user_gimbal);
+}
 /* USER CODE END 0 */
 
 /**
@@ -191,7 +199,12 @@ int main(void)
   Serialplot_Init(&user_serialplot, &user_serialplot_uart,
                   ChassisControl_Get_Tunable(&tunable_num), tunable_num,
                   CHASSIS_SERIALPLOT_PERIOD_MS);
-#if CHASSIS_SERIALPLOT_MOTOR
+#if   CHASSIS_SERIALPLOT_MODE == 2
+  /* 云台 yaw 调试：反馈角 / 目标角 / 电机多圈角 / 转速 */
+  Serialplot_Set_Data(&user_serialplot, 4,
+                      &user_gimbal.yaw, &user_gimbal.target_yaw,
+                      &user_gimbal.angle_raw, &user_gimbal.speed);
+#elif CHASSIS_SERIALPLOT_MODE == 1
   /* 4 轮目标 / 反馈转子转速 */
   Serialplot_Set_Data(&user_serialplot, 8,
                       &user_chassis.rpm[0], &user_chassis.rpm_fdb[0],
@@ -216,6 +229,7 @@ int main(void)
 
   /* 挂航向源 */
   ChassisControl_Set_HeadingSource(Chassis_Heading_Get);
+  ChassisControl_Set_SourceValid(Chassis_Source_Valid);
   SysTick_InitTask(&chassis_task, NULL, CHASSIS_PERIOD_MS, CHASSIS_PERIOD_MS,
                    Task_REPEAT, ChassisControl_Task);
   SysTick_StartTask(&chassis_task);

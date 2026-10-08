@@ -93,6 +93,8 @@ static void DJI_Motor_Handle(void* user_can) {
         if (motor->can->hcan != can->hcan || motor->fdb_id != can->rx_msg.StdId)
             continue;
 
+        motor->rx_count++;
+
         const uint16_t last_rotor_angle = motor->rotor_angle;
 
         const uint8_t *data = can->rx_msg.Data;

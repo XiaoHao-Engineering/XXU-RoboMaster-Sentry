@@ -19,11 +19,18 @@ typedef enum {
    要小陀螺走直线就接云台 yaw 编码器，返回云台相对底盘的角度 */
 typedef float (*Chassis_HeadingSource)(void);
 
+/* 航向源是否可信：返回 0 表示角度当前不可用（比如云台电机掉线） */
+typedef uint8_t (*Chassis_SourceValid)(void);
+
 /* 默认值：返回 0，功能退化为车体系直控 */
 float ChassisControl_NoHeading(void);
 
+/* 默认值：始终可信 */
+uint8_t ChassisControl_SourceAlwaysValid(void);
+
 void ChassisControl_Init(Chassis* chassis, DBUS_DRIVES* dbus);
 void ChassisControl_Set_HeadingSource(Chassis_HeadingSource source);
+void ChassisControl_Set_SourceValid(Chassis_SourceValid valid);
 
 /* 遥控指令 -> 底盘速度 -> 下发电机，按 CHASSIS_PERIOD_MS 周期调用 */
 void ChassisControl_Update(void);

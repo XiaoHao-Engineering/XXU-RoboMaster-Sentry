@@ -63,6 +63,7 @@ typedef struct {
     int16_t rotor_speed;                  /* 转子速度 单位: rpm */
     int16_t torque_current;               /* 转矩电流 */
     uint8_t temperate;                    /* 温度 单位: 摄氏度 */
+    uint32_t rx_count;                    /* 收到反馈帧的累计次数，用于掉线检测 */
     CONTROLLER_INTERFACE* controller;     /* PID 控制器 */
 } DJI_MOTOR_DRIVES;
 

@@ -3,7 +3,9 @@
 大疆 A 板（STM32F427IIH6）麦轮 / 全向轮底盘框架。CMake + Ninja + VSCode。
 A 板装在**云台**上，板载 IMU 只解算 **Yaw + Pitch** 两轴；云台 yaw 用 **GM6020** 的绝对编码器。
 
-> **V1.1** —— 已上车实测：直行 / 左右平移 / 原地自转 / 小陀螺 四个动作方向全部正确。
+> **V1.2** —— 已上车实测：四轮运动方向正确；**GM6020 云台 yaw 遥控正常、掉线保护正常、上电不冲**。
+>
+> 控制原理（小陀螺走直线 / 跟随）另见 [`docs/小陀螺与跟随_控制原理.md`](docs/小陀螺与跟随_控制原理.md)。
 
 ## 架构
 
@@ -116,6 +118,7 @@ DBUS 通道：`0=右手水平 1=右手垂直 2=左手水平 3=左手垂直`
 | 左摇杆 **前后** | `ch3` | 前进 / 后退 |
 | 左摇杆 **左右** | `ch2` | 左 / 右平移 |
 | 右摇杆 **左右** | `ch0` | **原地自转**（比例）|
+| 右摇杆 **上下** | `ch1` | **云台 yaw 角度**（可在线改 `gimbal_ch`）|
 | 左拨杆 `sw1` | — | 切模式 |
 
 通道号在 `chassis_config.h` 里，想换随时改：
@@ -126,6 +129,10 @@ DBUS 通道：`0=右手水平 1=右手垂直 2=左手水平 3=左手垂直`
 #define CHASSIS_RC_W_CH     (0)     /* 自转 */
 #define CHASSIS_SPIN_DIR_CH (2)     /* 小陀螺模式的转向 */
 ```
+
+> ⚠️ **航向源必须是"云台锁住世界方向"时才成立** ——
+> 现在云台环用的是"云台相对底盘角"，云台会跟着底盘转，所以 θ 恒为 0，**小陀螺实际是画圈、跟随会原地自转**。
+> 原因和修法见 [`docs/小陀螺与跟随_控制原理.md`](docs/小陀螺与跟随_控制原理.md) 第六节。
 
 ### 三种模式（`sw1` 切换）
 
@@ -202,19 +209,71 @@ float Gimbal_Get_Yaw(&user_gimbal);   /* 云台相对底盘 deg，逆时针为�
 Gimbal_Set_Zero(&user_gimbal);        /* 把当前位置记成云台正前方 */
 ```
 
-### 上电必须标定的 3 个值（都在 `gimbal.h`）
+### 上电要核对的 2 个值（都在 `gimbal.h`）
 
 | 宏 | 怎么定 |
 |---|---|
-| `GIMBAL_YAW_MOTOR_ID` | GM6020 拨码/上位机设的 ID，默认 1 |
-| `GIMBAL_YAW_ZERO_DEG` | 手动把云台摆到**正对底盘前方**，读 `DJI_Motor_Get_Angle()` 的值填进来；或运行中调 `Gimbal_Set_Zero()` |
-| `GIMBAL_YAW_DIR` | 逆时针转云台，若 `Gimbal_Get_Yaw()` **增大**就是 `+1`，否则 `-1` |
+| `GIMBAL_YAW_MOTOR_ID` | GM6020 拨码/上位机设的 ID，默认 **1** |
+| `GIMBAL_YAW_DIR` | 手推云台松手：**回位收敛 = `+1`**，越跑越远 = `-1` |
 
-### 遥控器通道
+> **`GIMBAL_YAW_ZERO_DEG` 已经不用标定了** —— V1.2 起了"上电首次对齐"（见下），
+> 上电后第一帧反馈到达时会自动以**当前位置**为零点。那个宏只在第一帧之前有效。
 
-`GIMBAL_RC_ENABLE = 0`（默认）—— **`ch0` 让给底盘自转了**，云台不动，保持正前方。
+### 上电首次对齐（V1.2）
 
-想恢复云台遥控：把 `CHASSIS_RC_W_CH` 改成 `1`（自转改用右手垂直），再打开 `GIMBAL_RC_ENABLE`。
+**绝对编码器只知道"转子在哪"，不知道"云台朝哪个世界方向"。**
+如果上电直接下发目标，云台会**猛地冲向编码器零位**（最多 180°）。
+
+所以 `Gimbal_Update` 里加了这段：
+
+```c
+if (!gimbal->is_aligned) {
+    if (!gimbal->is_online) {
+        return;                 /* 还没收到反馈 → 一条指令都不发 */
+    }
+    Gimbal_Set_Zero(gimbal);    /* 以【当前位置】为零点 */
+    gimbal->is_aligned = 1;
+}
+```
+
+**⇒ 上电云台纹丝不动；云台掉线重连后也会重新对齐。**
+
+### 掉线保护（V1.2）
+
+**判据**：`user_gimbal_yaw_motor.rx_count` 连续 100 ms 不增长（= 丢 100 帧）就判定掉线。
+
+```c
+#define GIMBAL_OFFLINE_MS  (100)
+uint8_t Gimbal_Is_Online (const GIMBAL_DRIVES* g);   /* 反馈是否正常 */
+uint8_t Gimbal_Is_Aligned(const GIMBAL_DRIVES* g);   /* 是否已对齐 */
+uint8_t Gimbal_Is_Reliable(const GIMBAL_DRIVES* g);  /* 能否给底盘当航向源 */
+```
+
+**`Gimbal_Is_Reliable()` 的判定表：**
+
+| 情况 | 返回值 | 小陀螺 |
+|---|---|---|
+| **从没连上过**（裸车调试）| **1** | ✅ 允许（θ 恒为 0，不会乱跑）|
+| **连上过又掉线** | **0** | ❌ **禁止自转**（θ 是冻结值，会让车跑偏）|
+| 在线但未对齐 | 0 | ❌ 禁止 |
+| 在线且已对齐 | 1 | ✅ 允许 |
+
+**⇒ 云台掉线时：禁止自转 + 不做航向补偿，但前后左右平移仍可用。**
+
+**⚠️ 想看舵机反馈通不通**：在调试器里看 `user_gimbal_yaw_motor.rx_count` 涨不涨。
+
+### 遥控器通道（V1.2 已开启）
+
+```c
+#define GIMBAL_RC_ENABLE  (1)        /* 开启遥控 */
+#define GIMBAL_RC_CH      (1)        /* 0=右手水平 1=右手垂直 2=左手水平 3=左手垂直 */
+#define GIMBAL_RC_RANGE   (180.0f)   /* 满杆 = ±180° */
+```
+
+**⇒ 右摇杆【上下】控制云台 yaw 的绝对角度（推到底 = ±180°，杆回中 = 回对齐位置）。**
+
+**⚠️ 这是「角度」控制，不是「速度」控制** —— 推着云台会转过去然后停住。
+**通道号可以在线改**：`gimbal_ch=0#` / `1#` / `2#` / `3#`。
 
 ## 板载 IMU（MPU6500，装在云台上）
 
@@ -269,8 +328,16 @@ MPU6500_Calibrate_Start(&user_mpu6500);      /* 重新标定零偏 */
 | 板子 → 上位机 | `0xAB` + N×`float32`(小端) + 1 字节累加和 |
 | 上位机 → 板子 | `变量名=值#`，例如 `wheel_kp=18.5#` |
 
-**默认 8 通道**（`CHASSIS_SERIALPLOT_MOTOR = 1`）：4 个轮子的「目标 / 反馈」转子转速。
-改成 `0` 就切回 4 通道 `yaw / pitch / omega / vx`。
+**通道由 `CHASSIS_SERIALPLOT_MODE` 决定（三选一）：**
+
+| 值 | 通道 | 用途 |
+|---|---|---|
+| **2** ⭐ 当前 | `gyaw / gtgt / graw / gspd` | **云台 yaw 调试**（反馈角 / 目标角 / 电机多圈角 / 转速）|
+| 1 | 8 通道：4 轮的 目标/反馈 转子转速 | 底盘轮速调试 |
+| 0 | `yaw / pitch / omega / vx` | 姿态 |
+
+> ⭐ **看 `graw` 就能判断云台通不通**：恒为 0 = 反馈没收到。
+> **看 `gtgt` 就能判断遥控通道对不对**：推杆会变 = 对。
 
 ### 上位机
 
@@ -289,13 +356,13 @@ python tools\serialplot.py COM4       # 直接指定
 | 项 | 值 |
 |---|---|
 | Baud rate | 115200 |
-| **Number of channels** | **8**（必须和固件一致）|
+| **Number of channels** | **和 `CHASSIS_SERIALPLOT_MODE` 对应**（当前 = **4**）|
 | **Data format** | **float**（4 字节）|
 | **Endianness** | **Little endian** |
 | **Frame start** | `AB`（十六进制）|
 | **Checksum** | **Simple sum** |
 
-### 可在线调的 15 个变量
+### 可在线调的 17 个变量
 
 | 变量名 | 含义 | 范围 |
 |---|---|---|
@@ -307,13 +374,15 @@ python tools\serialplot.py COM4       # 直接指定
 | `head_kp` / `head_ki` / `head_kd` | 航向 PID（跟随模式）| — |
 | `wheel_kp` / `wheel_ki` / `wheel_kd` | 4 个轮速 PID（**一起改**）| — |
 | `rev_fl` / `rev_fr` / `rev_rl` / `rev_rr` | 4 个轮子方向 | −1 ~ 1 |
+| **`src_protect`** | **航向源保护开关**：`0` = 关掉（云台没接也能用小陀螺）| 0 ~ 1 |
+| **`gimbal_ch`** | **云台遥控通道**：`0`/`1`/`2`/`3` | 0 ~ 3 |
 
 **在线改动立刻生效，断电就丢。** 调满意了再写回 `chassis_config.h` 固化。
 
 变量表在 `chassis_control.c` 的 `chassis_tunable[]`，加一行就能多调一个参数。
 
 上报周期 `CHASSIS_SERIALPLOT_PERIOD_MS`（默认 10ms = 100Hz）。
-115200 下 8 通道每帧 34 字节，理论上限约 330Hz。
+115200 下 4 通道每帧 18 字节、8 通道 34 字节，理论上限都在 300Hz 以上。
 
 ## 上车标定流程
 
@@ -375,6 +444,25 @@ rev_fl=-1#     rev_fr=-1#     rev_rl=-1#     rev_rr=-1#
 dead=30#     wheel_kp=25#     wheel_ki=0.05#
 ```
 
+### 5. 云台 yaw
+
+```
+① 上电 → 云台应该【纹丝不动】（首次对齐生效）
+② 用手轻推云台再松手
+     ├─ 回位并稳住      → GIMBAL_YAW_DIR 正确 ✅
+     └─ 越跑越远 / 抖   → 改 gimbal.h 的 GIMBAL_YAW_DIR = -1
+③ 推右摇杆上下 → 云台转到对应角度
+     ├─ 不转 → 试 gimbal_ch=0# / 2# / 3#（通道不对）
+     └─ 转错方向 → GIMBAL_YAW_DIR 反了
+④ 拔掉云台 CAN 线，等 1 秒
+     ├─ 小陀螺推不动      → 掉线保护生效 ✅
+     └─ 平移仍可用        → ✅ 保护行为正确
+⑤ 插回 CAN 线 → 自转自动恢复，云台重新对齐
+```
+
+> ⚠️ **第一次测云台前，先把 `GIMBAL_YAW_MAX_OUT` 从 3000 调到 300**，
+> 万一 `GIMBAL_YAW_DIR` 反了也不会暴力。确认收敛后调回 3000。
+
 ## 底盘运动学与上层 API
 
 麦轮（X 型）和四轮全向轮的**逆解 + 正解**都已实现，改一行切换：
@@ -399,6 +487,40 @@ Chassis_Get_Velocity(&user_chassis, &vx, &vy, &omega); /* 正解，里程计 */
 
 > **功率上限别调太小**：72W 时每轮只有 3A，起步会堵转（表现为「只有一个轮子转」）。
 > 200W ≈ 8.3A 是实测可用的值，上限建议不超过 300W。
+
+## ⚠️ 已知问题 / 待办
+
+### 1. 云台环用「相对底盘角度」做反馈 —— 导致两个功能失效
+
+**现在 `Gimbal_Update()` 控的是 θ（云台相对底盘角），不是世界朝向。** 后果：
+
+| 功能 | 症状 | 原因 |
+|---|---|---|
+| **小陀螺走直线** | 变成画圈（ω=4、v=1 时半径仅 0.25 m）| 云台跟着底盘转 → θ ≡ 0 → 航向补偿退化成恒等变换 |
+| **跟随模式** | 变成原地自转停不下来 | 云台环和跟随环都在控 θ，互相追 |
+
+**修法**：把云台环的反馈从「编码器 θ」换成「IMU 的 yaw ψ_g」，让云台锁住世界方向。
+**详见 [`docs/小陀螺与跟随_控制原理.md`](docs/小陀螺与跟随_控制原理.md)。**
+
+### 2. 跟随环 `Kp` 参数严重失配
+
+```c
+#define CHASSIS_FOLLOW_KP  (30.0f)     /* 输出 = 30 × θ */
+#define CHASSIS_MAX_W      (3.0f)      /* 输出被夹到 ±3 rad/s */
+```
+
+```
+θ > 3/30 = 0.1°  →  输出就饱和到最大转速
+        ⇒ 全程是【开关控制】，必然超调振荡
+```
+
+**建议改成 `0.03 ~ 0.1`**，在线试：`head_kp=0.05#`
+
+### 3. 其他
+
+- **`tools/serialplot.py` 只在 Python 下可用**；串口助手只能调参、看不了曲线。
+- **加热（PB5）未启用** —— IMU 零偏会随温度漂，长时间云台 yaw 会偏。
+- **磁力计 IST8310 未接**（MCU 够不到 MPU6500 的 AUX I²C），yaw 无绝对参考。
 
 ## 常用操作
 
@@ -432,6 +554,7 @@ Ctrl+Shift+P → 任务: 运行任务 → CubeMX 生成后修补
 - 新增了 `.c` 文件后必须**重跑一次 CMake configure**（`GLOB_RECURSE` 只在 configure 时展开）。
 - 「没接线」的库还有很多（ADRC、LADRC、FIR、牛顿迭代、STP23、ADC、RNG 等），
   都编译好了但没人调用，被 `--gc-sections` 裁掉，所以**不占 Flash**。
+- `docs/小陀螺与跟随_控制原理.md` —— 小陀螺走直线 / 跟随的完整原理推导。
 - `tools/serialplot.py` 需要 `pyserial` + `matplotlib`：
   `python -m pip install pyserial matplotlib -i https://mirrors.aliyun.com/pypi/simple/`
 

@@ -19,6 +19,9 @@ static float s_wheel_kd = CHASSIS_SPEED_KD;
 /* 自转方向校正（在线可调） */
 static float s_omega_dir = CHASSIS_OMEGA_DIR;
 
+/* 航向源保护开关（在线可调）：1=启用（云台掉线就禁自转），0=关闭 */
+static float s_src_protect = 1.0f;
+
 /* 单轮测试：0=正常，1~4=只驱动对应轮子，负值反转 */
 static float s_test_wheel = 0.0f;
 static float s_test_rpm    = 500.0f;
@@ -36,6 +39,7 @@ static Chassis_Mode   s_mode = CHASSIS_MODE_MANUAL;
 static uint8_t        s_offline_ms = 0;
 static uint8_t        s_prev_sw1 = 0;
 static Chassis_HeadingSource s_heading_src = ChassisControl_NoHeading;
+static Chassis_SourceValid   s_source_valid = ChassisControl_SourceAlwaysValid;
 
 /* 私有函数声明 */
 static void  Chassis_Apply_Wheel_Gain(void);
@@ -51,6 +55,10 @@ static void  Heading_Pid_Reset(void);
 /* 不接航向源时用这个，功能退化为车体系直控 */
 float ChassisControl_NoHeading(void) {
     return 0.0f;
+}
+
+uint8_t ChassisControl_SourceAlwaysValid(void) {
+    return 1;
 }
 
 static void Chassis_Apply_Wheel_Gain(void) {
@@ -118,6 +126,7 @@ void ChassisControl_Init(Chassis* chassis, DBUS_DRIVES* dbus) {
     s_offline_ms = 0;
     s_prev_sw1 = 0;
     s_heading_src = ChassisControl_NoHeading;
+    s_source_valid = ChassisControl_SourceAlwaysValid;
 
     Heading_Pid_Reset();
     Chassis_Apply_Wheel_Gain();
@@ -127,6 +136,10 @@ void ChassisControl_Init(Chassis* chassis, DBUS_DRIVES* dbus) {
 void ChassisControl_Set_HeadingSource(Chassis_HeadingSource source) {
     s_heading_src = (source != NULL) ? source : ChassisControl_NoHeading;
     Heading_Pid_Reset();
+}
+
+void ChassisControl_Set_SourceValid(Chassis_SourceValid valid) {
+    s_source_valid = (valid != NULL) ? valid : ChassisControl_SourceAlwaysValid;
 }
 
 void ChassisControl_Update(void) {
@@ -147,6 +160,17 @@ void ChassisControl_Update(void) {
         Chassis_Update(s_chassis);
         return;
     }
+
+    /* 航向源不可信（比如云台掉线）时的保护；可在线上关掉方便单独调底盘 */
+    const uint8_t src_ok = (s_src_protect > 0.5f) ? s_source_valid() : (uint8_t)1;
+
+#if CHASSIS_SOURCE_LOST_STOP
+    if (!src_ok) {
+        Chassis_Set_Velocity(s_chassis, 0.0f, 0.0f, 0.0f);
+        Chassis_Update(s_chassis);
+        return;
+    }
+#endif
 
     /* 单轮测试模式 */
     if (s_test_wheel != 0.0f) {
@@ -183,8 +207,8 @@ void ChassisControl_Update(void) {
     float vy_body = vy;
 
 #if CHASSIS_HEADING_COMP
-    /* 参考系 -> 车体系：绕 z 轴转 theta（逆时针为正） */
-    const float theta_rad = Heading() * DEG2RAD;
+    /* 参考系 -> 车体系：绕 z 轴转 theta（逆时针为正）；航向源不可信就不补偿 */
+    const float theta_rad = (src_ok ? Heading() : 0.0f) * DEG2RAD;
     const float cos_t = cosf(theta_rad);
     const float sin_t = sinf(theta_rad);
     vx_body = vx * cos_t - vy * sin_t;
@@ -203,6 +227,11 @@ void ChassisControl_Update(void) {
     } else {
         /* 手动 = 右摇杆比例旋转；小陀螺 = 恒定转速 */
         omega = Chassis_Spin_Omega();
+    }
+
+    /* 航向源不可信：方向没有可靠参考，禁止自转 */
+    if (!src_ok) {
+        omega = 0.0f;
     }
 
     /* 自转方向校正 */
@@ -253,6 +282,10 @@ static const SERIALPLOT_VAR chassis_tunable[] = {
     {"rev_fr",   &s_rev_fr,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
     {"rev_rl",   &s_rev_rl,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
     {"rev_rr",   &s_rev_rr,  -1.0f,   1.0f,  Chassis_Apply_Reverse},
+    /* 航向源保护开关：0=关掉（云台没接也能用小陀螺） */
+    {"src_protect", &s_src_protect, 0.0f, 1.0f, NULL},
+    /* 云台遥控通道：0=右手水平 1=右手垂直 2=左手水平 3=左手垂直 */
+    {"gimbal_ch",   &user_gimbal.rc_ch, 0.0f, 3.0f, NULL},
 };
 
 const SERIALPLOT_VAR* ChassisControl_Get_Tunable(uint8_t* count) {

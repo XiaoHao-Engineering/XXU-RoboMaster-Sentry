@@ -66,7 +66,12 @@
 /* 航向补偿：1=按参考系方向行进（小陀螺走直线） ----------------------------*/
 #define CHASSIS_HEADING_COMP  (1)
 
-/* 串口绘图通道：1=4 轮目标/反馈转速（调车用），0=yaw/pitch/omega/vx --------*/
-#define CHASSIS_SERIALPLOT_MOTOR (1)
+/* 航向源（云台）掉线保护 --------------------------------------------------*/
+/* 1=掉线时完全停车（最安全）；0=只停自转，平移仍可用（方便调试） */
+#define CHASSIS_SOURCE_LOST_STOP  (0)
+
+/* 串口绘图通道选择 --------------------------------------------------------*/
+/* 0=姿态 yaw/pitch/omega/vx   1=底盘 4 轮 目标/反馈转速   2=云台 yaw 调试 */
+#define CHASSIS_SERIALPLOT_MODE  (2)
 
 #endif /* CHASSIS_CONFIG_H */
