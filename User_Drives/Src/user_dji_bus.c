@@ -21,6 +21,7 @@ static void rc_callback_handler(void) {
     dbus_drive->sw2  = ((dbus_buf[5] >> 4) & 0x0003) >> 0;
 
     dbus_drive->is_update = 1;
+    dbus_drive->rx_count++;       /* 累计帧数：多个模块各自用它判断"有没有新数据" */
 }
 
 // 在空闲中断中处理接收到的数据帧
@@ -49,6 +50,7 @@ static void dbus_rx_idle_callback(const UART_HandleTypeDef* huart) {
 void DBUS_Init(DBUS_DRIVES* user_dbus, UART_HandleTypeDef* huart) {
 
     user_dbus->is_update = 0;
+    user_dbus->rx_count = 0;
     user_dbus->huart = huart;
     dbus_drive = user_dbus;
 

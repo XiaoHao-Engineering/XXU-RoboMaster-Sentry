@@ -200,10 +200,11 @@ int main(void)
                   ChassisControl_Get_Tunable(&tunable_num), tunable_num,
                   CHASSIS_SERIALPLOT_PERIOD_MS);
 #if   CHASSIS_SERIALPLOT_MODE == 2
-  /* 云台 yaw 调试：反馈角 / 目标角 / 电机多圈角 / 转速 */
+  /* 云台 yaw 调试：相对底盘角 / 世界目标角 / IMU 实测世界角 / 目标转速
+     看 gtgt 和 gimu 是否重合 -> 锁世界效果 */
   Serialplot_Set_Data(&user_serialplot, 4,
                       &user_gimbal.yaw, &user_gimbal.target_yaw,
-                      &user_gimbal.angle_raw, &user_gimbal.speed);
+                      &user_gimbal.imu_yaw, &user_gimbal.target_speed);
 #elif CHASSIS_SERIALPLOT_MODE == 1
   /* 4 轮目标 / 反馈转子转速 */
   Serialplot_Set_Data(&user_serialplot, 8,
@@ -219,8 +220,9 @@ int main(void)
   /* 云台 yaw：GM6020，绝对编码器提供云台相对底盘的角度 */
   PID_Init(&user_gimbal_yaw_pid, GIMBAL_YAW_KP, GIMBAL_YAW_KI, GIMBAL_YAW_KD,
            GIMBAL_YAW_MAX_OUT, GIMBAL_YAW_MAX_IOUT);
+  /* ★ Rotor_speed：云台 yaw 用转速模式，锁世界的外环在 gimbal.c 里 */
   DJI_Motor_Init(&user_gimbal_yaw_motor, &user_can_1, GIMBAL_YAW_MOTOR_ID, 0.0f,
-                 GM6020, Rotor_angle, (CONTROLLER_INTERFACE*)&user_gimbal_yaw_pid);
+                 GM6020, Rotor_speed, (CONTROLLER_INTERFACE*)&user_gimbal_yaw_pid);
   DJI_Motor_Set_Power_Limit(&user_gimbal_yaw_motor, GIMBAL_YAW_POWER_LIMIT);
   Gimbal_Init(&user_gimbal, &user_gimbal_yaw_motor);
 

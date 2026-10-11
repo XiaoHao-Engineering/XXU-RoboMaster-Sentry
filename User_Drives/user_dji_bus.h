@@ -13,7 +13,8 @@
 /* 类型定义 */
 typedef struct {
     UART_HandleTypeDef* huart;   /* UART 硬件句柄 */
-    uint8_t is_update;           /* 数据更新标志 */
+    uint8_t is_update;           /* 数据更新标志（注意：会被消费者清零，多模块请用 rx_count）*/
+    uint32_t rx_count;           /* 收到遥控帧的累计次数，用于独立在线检测 */
     int16_t ch0;                 /* 通道 0 数据 右手水平 (-660 ~ 660) */
     int16_t ch1;                 /* 通道 1 数据 右手垂直 (-660 ~ 660) */
     int16_t ch2;                 /* 通道 2 数据 左手水平 (-660 ~ 660) */

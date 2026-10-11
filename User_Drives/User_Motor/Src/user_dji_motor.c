@@ -7,6 +7,12 @@
 /* 私有变量 */
 #define BUS_VOLTAGE 24.0f
 #define C620_MAX_CURRENT 20.0f   /* C620 满量程 20A 对应转矩电流 ±16384 */
+
+/* 13 位绝对编码器：一圈 8192 个计数（不是 8191）。
+   ⚠️ 角度换算必须用它。用 8191 会每圈多算 0.0122%，
+      云台转的圈数一多就线性累积：转 200 圈偏 8.8°，表现为"直行走偏"
+      （原地自转不经过航向补偿的坐标变换，所以不受影响）*/
+#define ENCODER_CPR  (8192.0f)
 static DJI_MOTOR_DRIVES* motor_drives[DJI_MOTOR_NUM];
 static uint8_t motor_num = 0;
 
@@ -137,7 +143,7 @@ static void DJI_Motor_Handle(void* user_can) {
                 break;
             }
             case Servo_angle: {
-                float error =  motor->target - (float)motor->rotor_angle / 8191.0f * 360.0f;
+                float error =  motor->target - (float)motor->rotor_angle / ENCODER_CPR * 360.0f;
 
                 if (error > 180.0f)
                     error -= 360.0f;
@@ -249,7 +255,7 @@ void DJI_Motor_Set_Power_Limit(void* motor, const float power_limit) {
 
 void DJI_Motor_Set_Rotor_Angle_Offset(void* motor, const float angle) {
     DJI_MOTOR_DRIVES* dji_motor = (DJI_MOTOR_DRIVES*)motor;
-    const int16_t rotor_angle_offset = (int16_t)(angle / 360.0f * 8191.0f);
+    const int16_t rotor_angle_offset = (int16_t)(angle / 360.0f * ENCODER_CPR);
     dji_motor->total_angle += rotor_angle_offset - dji_motor->rotor_angle_offset;
     dji_motor->rotor_angle_offset = rotor_angle_offset;
 }
@@ -266,7 +272,8 @@ float DJI_Motor_Get_Speed(void* motor) {
 
 float DJI_Motor_Get_Angle(void* motor) {
     const DJI_MOTOR_DRIVES* dji_motor = (DJI_MOTOR_DRIVES*)motor;
-    return (float)dji_motor->total_angle / 8191.0f * 360.0f;
+    /* total_angle 单位是编码器计数，一圈 ENCODER_CPR 个 -> 除以它才是角度 */
+    return (float)dji_motor->total_angle / ENCODER_CPR * 360.0f;
 }
 
 float DJI_Motor_Get_Current(void* motor) {

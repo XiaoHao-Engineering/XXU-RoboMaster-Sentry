@@ -2,6 +2,9 @@
 #include "../gimbal.h"
 
 #define YAW_STICK_MAX   (660.0f)
+#define RAD_S_TO_RPM    (9.54929659f)   /* 60 / 2pi */
+#define RAD_TO_DEG      (57.29578f)
+#define GIMBAL_DT_S     (0.001f)        /* Gimbal_Update 跑在 1kHz */
 
 static GIMBAL_DRIVES* s_gimbal = NULL;
 
@@ -24,6 +27,13 @@ void Gimbal_Init(GIMBAL_DRIVES* gimbal, DJI_MOTOR_DRIVES* yaw_motor) {
     gimbal->is_aligned = 0;
     gimbal->has_ever_online = 0;
     gimbal->rc_ch = (float)GIMBAL_RC_CH;
+    gimbal->max_w = GIMBAL_YAW_MAX_W;
+    gimbal->world_kp = GIMBAL_WORLD_KP;
+    gimbal->ff_gain = GIMBAL_FF_GAIN;
+    gimbal->last_dbus_count = 0;
+    gimbal->dbus_offline_ms = 0;
+    gimbal->imu_yaw = 0.0f;
+    gimbal->target_speed = 0.0f;
 
     PID_Init(&gimbal->yaw_pid, GIMBAL_YAW_KP, GIMBAL_YAW_KI, GIMBAL_YAW_KD,
              GIMBAL_YAW_MAX_OUT, GIMBAL_YAW_MAX_IOUT);
@@ -90,12 +100,42 @@ static void Gimbal_Update(void* arg) {
     gimbal->angle_raw = DJI_Motor_Get_Angle(gimbal->yaw_motor);
     gimbal->speed = DJI_Motor_Get_Speed(gimbal->yaw_motor);
 
+#if GIMBAL_LOCK_WORLD
+    /* A 板在云台 yaw 上，所以 IMU 的 yaw 就是【云台的世界朝向】 */
+    gimbal->imu_yaw = Gimbal_Wrap180(Attitude_Get_Yaw(&user_attitude));
+#endif
+
 #if GIMBAL_RC_ENABLE
-    if (user_dbus.is_update) {
-        /* 推上 -> target_yaw 为正，推下 -> 为负；实际转向由 GIMBAL_YAW_DIR 决定 */
-        gimbal->target_yaw = Gimbal_Stick(Gimbal_RC_Channel((uint8_t)gimbal->rc_ch))
-                           * GIMBAL_RC_RANGE;
+    /* 遥控在线检测：用 rx_count 而不是 is_update。
+       ① is_update 会被底盘任务清零，两个模块抢同一个标志会丢数据
+       ② DT7 遥控刷新率只有 ~71Hz，而本任务跑 1kHz —— 拿它当积分门控
+          会让积分速度只剩 1/14（这是"云台转不动"的根因）*/
+    if (user_dbus.rx_count != gimbal->last_dbus_count) {
+        gimbal->last_dbus_count = user_dbus.rx_count;
+        gimbal->dbus_offline_ms = 0;
+    } else if (gimbal->dbus_offline_ms < GIMBAL_OFFLINE_MS) {
+        gimbal->dbus_offline_ms++;
     }
+
+    /* 遥控断线就把杆量当 0：锁世界模式会停住不动，速度模式会主动刹车 */
+    const float stick = (gimbal->dbus_offline_ms < GIMBAL_OFFLINE_MS)
+                      ? Gimbal_Stick(Gimbal_RC_Channel((uint8_t)gimbal->rc_ch))
+                      : 0.0f;
+
+#if GIMBAL_LOCK_WORLD
+    /* ★ 每个周期都积分（本任务固定 1kHz，DT = 1ms）
+       摇杆不动时每周期加 stick*max_w*0.001*57.3 度，1 秒正好累到目标角速度 */
+    gimbal->target_yaw += stick * gimbal->max_w * GIMBAL_DT_S
+                        * RAD_TO_DEG * GIMBAL_YAW_DIR;
+    gimbal->target_yaw = Gimbal_Wrap180(gimbal->target_yaw);
+#else
+    /* 纯速度控制：推着匀速转、松杆主动刹车停在当前位置 */
+    gimbal->target_speed = stick * gimbal->max_w * RAD_S_TO_RPM * GIMBAL_YAW_DIR;
+#endif
+#else
+#if !GIMBAL_LOCK_WORLD
+    gimbal->target_speed = 0.0f;
+#endif
 #endif
 
     /* 首次对齐：绝对编码器只知道"转子在哪"，上电时 zero_deg 还是旧值，
@@ -106,17 +146,31 @@ static void Gimbal_Update(void* arg) {
             return;
         }
         Gimbal_Set_Zero(gimbal);
+#if GIMBAL_LOCK_WORLD
+        gimbal->target_yaw = gimbal->imu_yaw;   /* 世界目标 = 当前世界朝向 */
+#endif
         gimbal->is_aligned = 1;
     }
 
     gimbal->yaw = Gimbal_Get_Yaw(gimbal);
 
-    /* 目标转成最短路径的多圈角度：A_new = A_cur + (target - yaw) * DIR */
-    const float error = Gimbal_Wrap180(gimbal->target_yaw - gimbal->yaw);
-    const float cur_angle = gimbal->angle_raw;
+#if GIMBAL_LOCK_WORLD
+    /* ★ 锁世界 = 位置环 + 底盘角速度前馈
+       位置环：让云台世界朝向追上 target_yaw
+       前馈：  底盘以 omega 自转时，云台必须相对底盘反向转同样角速度，
+               才能在世界系里不动 —— 这样云台才不会跟着底盘跑
+       两项都要乘 GIMBAL_YAW_DIR（它是"编码器角度增大"的转向系数）*/
+    const float error = Gimbal_Wrap180(gimbal->target_yaw - gimbal->imu_yaw);
 
-    gimbal->yaw_motor->Set_Motor_State(gimbal->yaw_motor,
-                                       cur_angle + error * GIMBAL_YAW_DIR);
+    gimbal->target_speed = GIMBAL_YAW_DIR *
+                           (gimbal->world_kp * error
+                            - user_chassis.omega * RAD_S_TO_RPM * gimbal->ff_gain);
+
+    gimbal->yaw_motor->Set_Motor_State(gimbal->yaw_motor, gimbal->target_speed);
+#else
+    /* 纯速度控制：直接把转速目标交给电机内置的速度环 */
+    gimbal->yaw_motor->Set_Motor_State(gimbal->yaw_motor, gimbal->target_speed);
+#endif
 }
 
 /* 取 DBUS 指定通道 */
@@ -131,6 +185,11 @@ static int16_t Gimbal_RC_Channel(const uint8_t ch) {
 }
 
 static float Gimbal_Wrap180(float deg) {
+    /* 先用整数除法一次折叠到 ±360 以内再微调。
+       云台会一直转，total_angle 累积后 deg 可能几万度，
+       纯 while 循环要迭代上百次 —— 1kHz 任务里会越来越慢 */
+    deg -= 360.0f * (float)((int32_t)(deg / 360.0f));
+
     while (deg >= 180.0f) {
         deg -= 360.0f;
     }

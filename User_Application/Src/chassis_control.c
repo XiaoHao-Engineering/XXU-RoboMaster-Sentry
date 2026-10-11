@@ -207,8 +207,12 @@ void ChassisControl_Update(void) {
     float vy_body = vy;
 
 #if CHASSIS_HEADING_COMP
-    /* 参考系 -> 车体系：绕 z 轴转 theta（逆时针为正）；航向源不可信就不补偿 */
-    const float theta_rad = (src_ok ? Heading() : 0.0f) * DEG2RAD;
+    /* 参考系 -> 车体系：绕 z 轴转 theta（逆时针为正）
+       手动模式    -> 以【车头】为正方向：theta 取 0（R(0) 就是恒等变换）
+       跟随/小陀螺 -> 以【云台指向】为正方向：theta 用航向源
+       航向源不可信时也退回 0（车体系），保证还能开 */
+    const uint8_t use_heading = (src_ok && (s_mode != CHASSIS_MODE_MANUAL)) ? 1 : 0;
+    const float theta_rad = (use_heading ? Heading() : 0.0f) * DEG2RAD;
     const float cos_t = cosf(theta_rad);
     const float sin_t = sinf(theta_rad);
     vx_body = vx * cos_t - vy * sin_t;
@@ -218,12 +222,25 @@ void ChassisControl_Update(void) {
     float omega = 0.0f;
 
     if (s_mode == CHASSIS_MODE_FOLLOW) {
-        /* 航向 PID：夹角 theta -> 0 */
+        /* 比例项：夹角 theta -> 0
+           PID 的 D 项固定为 0：theta 在 ±180 处跳变，对误差微分会出尖峰 */
         s_heading_pid.kp = s_head_kp;
         s_heading_pid.ki = s_head_ki;
-        s_heading_pid.kd = s_head_kd;
+        s_heading_pid.kd = 0.0f;
         PID_Set_Target(&s_heading_pid, Heading());
         omega = PID_Calculate(&s_heading_pid, 0.0f, 0.0f);
+
+        /* ★ 阻尼项：用底盘【实测】角速度抑制超调
+           为什么不用 d(theta)/dt：
+             ① theta 有 ±180 跳变，微分会出尖峰
+             ② 实测角速度的物理意义就是"现在转多快"，转得越快越提前收力
+           为什么需要它：
+             只有 P 时，底盘会满速冲过 theta=0 再折返，形成极限环来回摆；
+             加上这一项等于在到达目标前就开始刹车
+           ⚠️ 架空调试时轮子空转，这个反馈不反映车体真实转动，阻尼会失真 */
+        float vx_fb, vy_fb, omega_fb;
+        Chassis_Get_Velocity(s_chassis, &vx_fb, &vy_fb, &omega_fb);
+        omega -= s_head_kd * omega_fb;
     } else {
         /* 手动 = 右摇杆比例旋转；小陀螺 = 恒定转速 */
         omega = Chassis_Spin_Omega();
@@ -286,6 +303,13 @@ static const SERIALPLOT_VAR chassis_tunable[] = {
     {"src_protect", &s_src_protect, 0.0f, 1.0f, NULL},
     /* 云台遥控通道：0=右手水平 1=右手垂直 2=左手水平 3=左手垂直 */
     {"gimbal_ch",   &user_gimbal.rc_ch, 0.0f, 3.0f, NULL},
+    /* 云台速度环（Rotor_speed 模式）：满杆角速度 + 转速 PID */
+    {"gimbal_max_w", &user_gimbal.max_w, 0.0f, 30.0f, NULL},
+    {"gimbal_world_kp", &user_gimbal.world_kp, 0.0f, 50.0f, NULL},
+    {"gimbal_ff",  &user_gimbal.ff_gain, 0.0f, 1.0f, NULL},
+    {"gimbal_kp",  &user_gimbal_yaw_pid.kp, 0.0f, 200.0f, NULL},
+    {"gimbal_ki",  &user_gimbal_yaw_pid.ki, 0.0f,  50.0f, NULL},
+    {"gimbal_kd",  &user_gimbal_yaw_pid.kd, 0.0f,  50.0f, NULL},
 };
 
 const SERIALPLOT_VAR* ChassisControl_Get_Tunable(uint8_t* count) {

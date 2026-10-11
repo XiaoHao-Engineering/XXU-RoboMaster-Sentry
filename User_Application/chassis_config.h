@@ -42,9 +42,15 @@
 #define CHASSIS_OMEGA_DIR (1.0f)
 
 /* 跟随 --------------------------------------------------------------------*/
-#define CHASSIS_FOLLOW_KP (30.0f)
+/* Kp 单位是 rad/s per deg：30 配 MAX=3 时只要偏 0.1 度就饱和，等于开关控制，
+   必然来回振荡；0.05 让满量程偏差(180 度)对应 9 rad/s，落在限幅内才是线性比例 */
+#define CHASSIS_FOLLOW_KP (0.05f)
 #define CHASSIS_FOLLOW_KI (0.0f)
-#define CHASSIS_FOLLOW_KD (0.0f)   /* D 对 ±180 跳变敏感，默认 0 */
+/* Kd 是【底盘实测角速度】的阻尼系数（不是 theta 的微分）：
+   omega = Kp*theta - Kd*omega_实测
+   0.3 表示底盘满速 3rad/s 时抵消 0.9rad/s 的输出，能在到点前提前刹车。
+   还摆就加大（0.5 / 0.8），反应迟钝就减小 */
+#define CHASSIS_FOLLOW_KD (0.3f)
 #define CHASSIS_FOLLOW_MAX (6.0f)
 
 /* 轮速 PID ----------------------------------------------------------------*/
@@ -64,6 +70,9 @@
 #define CHASSIS_SERIALPLOT_PERIOD_MS (10)   /* 上报周期 ms，10=100Hz */
 
 /* 航向补偿：1=按参考系方向行进（小陀螺走直线） ----------------------------*/
+/* 手动模式    -> 以【车头】为正方向（不补偿）
+   跟随/小陀螺 -> 以【云台指向】为正方向（补偿）
+   要求云台锁住世界方向，见 gimbal.h 的 GIMBAL_LOCK_WORLD */
 #define CHASSIS_HEADING_COMP  (1)
 
 /* 航向源（云台）掉线保护 --------------------------------------------------*/
