@@ -519,6 +519,15 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     __HAL_LINKDMA(huart,hdmatx,hdma_usart2_tx);
 
     /* USER CODE BEGIN USART2_MspInit 1 */
+    /* ★ 使能 USART2 全局中断。
+       CubeMX 里没勾 "global interrupt"，所以生成的代码里没有这两行
+       （USART1/USART3 都有）。没有它：
+         - DMA 发送完成回调 HAL_UART_TxCpltCallback 不会来 -> gState 卡在 BUSY_TX
+           -> 绘图只发得出第一帧
+         - ReceiveToIdle 的 IDLE 中断也不会来 -> 收不到上位机指令
+       优先级给 1（低于 CAN/TIM2 的 0），让控制相关中断能抢占它 */
+    HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
 
     /* USER CODE END USART2_MspInit 1 */
   }

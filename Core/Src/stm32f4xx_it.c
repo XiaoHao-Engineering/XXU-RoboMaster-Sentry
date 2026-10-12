@@ -70,6 +70,7 @@ extern DMA_HandleTypeDef hdma_usart3_tx;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart3;
 /* USER CODE BEGIN EV */
+extern UART_HandleTypeDef huart2;   /* CubeMX 没给 USART2 生成中断，这里手动补 */
 
 /* USER CODE END EV */
 
@@ -366,5 +367,20 @@ void DMA2_Stream7_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/* ★ USART2 全局中断服务函数
+   CubeMX 里 USART2 没勾 "global interrupt"，所以既没使能 NVIC、也没有这个函数
+   （USART1/USART3 都是有的）。缺了它会有两个后果：
+     ① DMA 发送完成 -> HAL 使能 USART 的 TC 中断 -> 本该由这里调
+        HAL_UART_IRQHandler -> HAL_UART_TxCpltCallback 把 gState 放回 READY。
+        没有中断 => 回调不来 => gState 永久 BUSY_TX
+        => 之后 HAL_UART_Transmit_DMA 全部返回 HAL_BUSY
+        => 【只发得出第一帧数据，然后彻底停住】
+     ② ReceiveToIdle 靠 IDLE 中断判帧尾 => 收不到上位机调参指令
+   放在 USER CODE 区，CubeMX 重新生成不会丢 */
+void USART2_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart2);
+}
 
 /* USER CODE END 1 */

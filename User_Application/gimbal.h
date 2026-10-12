@@ -26,9 +26,13 @@
    Ki 用来消除摩擦引起的稳态误差（原角度环的 0 在速度环下不够）
    Kd 保持 0：转速反馈是整数 RPM，差分噪声大，Kd 会放大抖动
    都能在线调：gimbal_kp / gimbal_ki / gimbal_kd */
-#define GIMBAL_YAW_KP           (25.0f)
-#define GIMBAL_YAW_KI           (0.5f)
-#define GIMBAL_YAW_KD           (0.0f)
+/* 实测推算值（方波注入法测出来的）：
+   Kp：方波测试下"上升够快 + 平台干净"落在 25~40，取 30
+   Ki：方波下不需要（会积分饱和），需要时从 0.02 起
+   Kd：补偿 CAN + 处理延迟，差分形式约 1.0 */
+#define GIMBAL_YAW_KP           (30.0f)
+#define GIMBAL_YAW_KI           (0.0f)
+#define GIMBAL_YAW_KD           (1.0f)
 #define GIMBAL_YAW_MAX_OUT      (3000.0f)    /* GM6020 电流帧量程 */
 #define GIMBAL_YAW_MAX_IOUT     (1000.0f)
 
@@ -36,13 +40,23 @@
 #define GIMBAL_RC_ENABLE        (1)          /* 现在用右摇杆【垂直】测云台 yaw */
 #define GIMBAL_RC_CH            (1)          /* ★ 用哪个通道：1 = 右摇杆上下 */
 #define GIMBAL_YAW_MAX_W        (6.0f)       /* 满杆角速度 rad/s */
-#define GIMBAL_WORLD_KP         (2.0f)       /* 锁世界位置环增益 RPM/deg */
+#define GIMBAL_WORLD_KP         (1.0f)       /* 锁世界位置环增益 RPM/deg */
 /* 底盘角速度前馈系数 0~1：前馈是开环的，底盘响应有延迟/打滑时给满会过补偿，
    表现为云台来回追 -> theta 抖 -> 车头摇。抖就往下调，迟钝就往上调 */
-#define GIMBAL_FF_GAIN          (0.7f)
+#define GIMBAL_FF_GAIN          (0.3f)
 #define GIMBAL_RC_DEAD          (10)
 
 /* 掉线保护：连续多少 ms 收不到 GM6020 反馈就判定掉线 ----------------------*/
+/* ---- PID 测试波形注入（调试用）------------------------------------------*/
+/* 打开后波形直接当【转速指令】驱动电机，绕过外环 —— 专门用来测方波/阶跃响应
+   看串口绘图的 gspd 对方波的跟随，来调 gimbal_kp / gimbal_ki
+   ⚠️ 建议参数：幅值 20 RPM、频率 2Hz（半周期 0.25s 约转 48°，不会撞限位）
+   在线可调：wave_en / wave_type / wave_amp / wave_freq / wave_duty */
+#define GIMBAL_WAVE_ENABLE      (1)      /* 0=完全编译掉，1=允许用 wave_en 打开 */
+#define GIMBAL_WAVE_AMP_DEF     (20.0f)  /* 默认幅值 RPM */
+#define GIMBAL_WAVE_FREQ_DEF    (2.0f)   /* 默认频率 Hz */
+#define GIMBAL_WAVE_MAX_RPM     (150.0f) /* 波形输出限幅，保护电机 */
+
 #define GIMBAL_OFFLINE_MS       (100)
 
 /* 类型定义 ---------------------------------------------------------------*/
@@ -58,6 +72,7 @@ typedef struct {
     float rc_ch;                   /* 遥控通道 0~3，可在线改 */
     float max_w;                   /* 满杆角速度 rad/s，可在线改 */
     float world_kp;                /* 锁世界位置环增益 RPM/deg，可在线改 */
+    float target_rate;             /* 摇杆给的目标角速度 deg/s（外环前馈用）*/
     float ff_gain;                 /* 底盘角速度前馈系数 0~1，可在线改 */
     uint32_t last_dbus_count;      /* 上一周期见到的遥控帧计数 */
     uint16_t dbus_offline_ms;      /* 遥控断线累计 ms */
@@ -70,6 +85,13 @@ typedef struct {
     uint8_t  is_online;            /* 1=反馈正常 */
     uint8_t  is_aligned;           /* 1=已完成首次对齐（以当前位置为零点） */
     uint8_t  has_ever_online;      /* 1=本次上电曾经收到过反馈 */
+
+    /* ---- PID 测试波形（调试用，在线可调）---- */
+    float wave_en;                 /* 1=波形注入打开 */
+    float wave_type;               /* WAVE_TYPE 枚举值 */
+    float wave_amp;                /* 幅值 RPM */
+    float wave_freq;               /* 频率 Hz */
+    float wave_duty;               /* 占空比 0~1 */
 } GIMBAL_DRIVES;
 
 /* 函数声明 ---------------------------------------------------------------*/
@@ -94,5 +116,8 @@ uint8_t Gimbal_Is_Aligned(const GIMBAL_DRIVES* gimbal);
      在线但没对齐 -> 不可信
      在线且已对齐 -> 可信 */
 uint8_t Gimbal_Is_Reliable(const GIMBAL_DRIVES* gimbal);
+
+/* 把 user_gimbal 里的波形参数应用到 user_wave（在线改参数后调用） */
+void Gimbal_Wave_Apply(void);
 
 #endif // GIMBAL_H

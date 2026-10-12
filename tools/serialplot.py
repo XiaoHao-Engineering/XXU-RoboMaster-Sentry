@@ -4,7 +4,7 @@
 用法:
     python tools/serialplot.py            # 自动列出串口
     python tools/serialplot.py COM4       # 直接指定
-    python tools/serialplot.py COM4 8     # 指定串口和通道数
+    python tools/serialplot.py COM4 5     # 指定串口和通道数（要和固件模式一致）
 
 协议（和固件 user_serialplot.c 一致）:
     板子 -> PC :  0xAB + N x float32(小端) + 1 字节累加和
@@ -31,7 +31,7 @@ MAX_PTS  = 500          # 每条曲线保留的点数
 # 8 通道的名字（改这里就行）
 # 通道名要和固件里的 CHASSIS_SERIALPLOT_MODE 对应
 #   MODE=2 云台 yaw 调试（4 通道）
-NAMES = ["gyaw", "gtgt", "gimu", "gspd"]
+NAMES = ["gyaw", "gtgt", "gimu", "gcmd", "gspd"]
 #   MODE=1 底盘 4 轮转速（8 通道）
 # NAMES = ["FL tgt", "FL fdb", "FR tgt", "FR fdb",
 #          "RL tgt", "RL fdb", "RR tgt", "RR fdb"]
@@ -63,6 +63,8 @@ class App:
         self.ch = [deque([0.0] * MAX_PTS, maxlen=MAX_PTS) for _ in range(nch)]
         self.n_frames = 0
         self.n_bad = 0
+        self.n_bytes = 0          # 累计收到的字节数
+        self.err = None           # reader 线程的异常（有的话）
         self.running = True
 
         root.title("XXU-RoboMaster-Sentry  SerialPlot  @%s" % ser.port)
@@ -88,7 +90,7 @@ class App:
         self.entry.pack(side="left", padx=4)
         self.entry.bind("<Return>", lambda e: self.send())
         tk.Button(bar, text="发送", command=self.send).pack(side="left")
-        tk.Label(bar, text="例:  wheel_kp=18.5#   omega_dir=-1#   test_wheel=1#").pack(side="left", padx=10)
+        tk.Label(bar, text="例: gimbal_world_kp=0.5#   gimbal_ff=0.3#   head_kd=0.5#").pack(side="left", padx=10)
 
         self.status = tk.Label(root, text="", anchor="w")
         self.status.pack(fill="x", padx=6)
@@ -102,32 +104,42 @@ class App:
         while self.running:
             try:
                 n = self.ser.in_waiting
-            except Exception:
-                break
-            if n == 0:
-                time.sleep(0.004)
-                continue
-            buf += self.ser.read(n)
+                if n == 0:
+                    time.sleep(0.004)
+                    continue
+                chunk = self.ser.read(n)
+                if not chunk:
+                    time.sleep(0.004)
+                    continue
+                self.n_bytes += len(chunk)
+                buf += chunk
 
-            while len(buf) >= self.frame_len:
-                i = buf.find(HEADER)
-                if i < 0:
-                    buf.clear(); break
-                if i > 0:
-                    del buf[:i]; continue
-                if len(buf) < self.frame_len:
-                    break
-                frame = bytes(buf[:self.frame_len])
-                if (sum(frame[1:-1]) & 0xFF) == frame[-1]:
-                    vals = struct.unpack_from("<%df" % self.nch, frame, 1)
-                    with self.lock:
-                        for k in range(self.nch):
-                            self.ch[k].append(vals[k])
-                        self.n_frames += 1
-                    del buf[:self.frame_len]
-                else:
-                    self.n_bad += 1
-                    del buf[:1]
+                while len(buf) >= self.frame_len:
+                    i = buf.find(HEADER)
+                    if i < 0:
+                        buf.clear()
+                        break
+                    if i > 0:
+                        del buf[:i]
+                        continue
+                    if len(buf) < self.frame_len:
+                        break
+                    frame = bytes(buf[:self.frame_len])
+                    if (sum(frame[1:-1]) & 0xFF) == frame[-1]:
+                        vals = struct.unpack_from("<%df" % self.nch, frame, 1)
+                        with self.lock:
+                            for k in range(self.nch):
+                                self.ch[k].append(vals[k])
+                            self.n_frames += 1
+                        del buf[:self.frame_len]
+                    else:
+                        self.n_bad += 1
+                        del buf[:1]
+
+            except Exception as e:
+                # 以前这里一抛异常线程就静默死掉，界面上帧数冻住但看不出原因
+                self.err = repr(e)
+                time.sleep(0.05)
 
     # ----------------------------------------------------- 发
     def send(self):
@@ -156,9 +168,15 @@ class App:
             hi = max(max(d) for d in data)
             pad = (hi - lo) * 0.1 or 1.0
             self.ax.set_ylim(lo - pad, hi + pad)
-        self.status.config(text="帧 %d   校验错 %d   %s" %
-                                (nf, nb, " ".join("%s=%.0f" % (NAMES[i].replace(" ", ""), data[i][-1])
-                                                  for i in range(min(self.nch, 4)))))
+        txt = "帧 %d   校验错 %d   字节 %d   %s" % (
+            nf, nb, self.n_bytes,
+            " ".join("%s=%.0f" % (NAMES[i].replace(" ", ""), data[i][-1])
+                     for i in range(min(self.nch, 5))))
+        if self.err:
+            txt += "    [读取异常] " + self.err
+        elif nf == 0 and self.n_bytes == 0:
+            txt += "    [一个字节都没收到 -> 检查接线/COM号]"
+        self.status.config(text=txt)
         self.canvas.draw_idle()
         if self.running:
             self.root.after(50, self.refresh)

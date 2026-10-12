@@ -195,16 +195,33 @@ int main(void)
 
   /* USART2 串口绘图 / 在线调参 */
   UART_Init(&user_serialplot_uart, &huart2);
+
+  /* ---- 串口自检探针（调试用，确认通了可以删）----------------------------
+     用【阻塞】方式直接发，绕过 TX 队列和 DMA，专门用来区分故障位置：
+       串口助手里【看到】 SERIALPLOT OK  -> 引脚/接线/波特率都 OK，
+                                            问题在 TX 队列或 DMA
+       串口助手【看不到】                 -> 硬件接线问题：
+                                            TX/RX 接反了？GND 没接？
+     ⚠️ 注意：这里发的是 ASCII 文本，串口助手要用【文本】模式看；
+        而正常绘图的帧是二进制，要用【HEX】模式看才算数 */
+  {
+    static const char selftest[] = "SERIALPLOT OK\r\n";
+    HAL_UART_Transmit(&huart2, (uint8_t*)selftest, sizeof(selftest) - 1, 100);
+  }
   uint8_t tunable_num = 0;
   Serialplot_Init(&user_serialplot, &user_serialplot_uart,
                   ChassisControl_Get_Tunable(&tunable_num), tunable_num,
                   CHASSIS_SERIALPLOT_PERIOD_MS);
 #if   CHASSIS_SERIALPLOT_MODE == 2
-  /* 云台 yaw 调试：相对底盘角 / 世界目标角 / IMU 实测世界角 / 目标转速
-     看 gtgt 和 gimu 是否重合 -> 锁世界效果 */
-  Serialplot_Set_Data(&user_serialplot, 4,
+  /* 云台 yaw 调试（5 通道）：
+       gyaw 云台相对底盘角 theta  |  gtgt 世界目标角  |  gimu IMU实测世界角
+       gcmd 目标转速 RPM          |  gspd 实际转速 RPM
+     看 gtgt/gimu 是否贴合 -> 锁世界效果
+     看 gcmd/gspd 是否贴合 -> 电机速度环跟不跟得上 */
+  Serialplot_Set_Data(&user_serialplot, 5,
                       &user_gimbal.yaw, &user_gimbal.target_yaw,
-                      &user_gimbal.imu_yaw, &user_gimbal.target_speed);
+                      &user_gimbal.imu_yaw, &user_gimbal.target_speed,
+                      &user_gimbal.speed);
 #elif CHASSIS_SERIALPLOT_MODE == 1
   /* 4 轮目标 / 反馈转子转速 */
   Serialplot_Set_Data(&user_serialplot, 8,

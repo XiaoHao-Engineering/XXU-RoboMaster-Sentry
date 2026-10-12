@@ -57,6 +57,9 @@ PID_Controller user_wheel_pid_rr = {0};
 Chassis user_chassis = {0};
 SysTick_Task chassis_task = {0};
 
+/* PID 测试用波形发生器 */
+WAVEFORM_DRIVES user_wave = {0};
+
 /* 云台 yaw */
 DJI_MOTOR_DRIVES user_gimbal_yaw_motor = {0};
 PID_Controller   user_gimbal_yaw_pid = {0};

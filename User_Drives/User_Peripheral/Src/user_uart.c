@@ -27,11 +27,20 @@ static void UART_QueueHandle(void) {
         }
 
         // 处理发送队列
-        if (!Queue_IsEmpty(&uart->tx_queue)) {
-            if (uart->status == UART_IDLE) {
-                const Node* temp = Queue_Pop(&uart->tx_queue);
-                HAL_UART_Transmit_DMA(uart->huart, (uint8_t*)temp->data, temp->len);
-                uart->status = UART_SENDING;
+        /* 不用自己维护的 uart->status 判断忙闲：那个标志只能靠 TxCplt 回调复位，
+           一旦回调丢了就永久卡在 SENDING，现象是"只发得出第一帧就再没数据"。
+           直接问 HAL 的 gState —— RX 正在收不影响 TX 的 gState。
+           另外发送失败时要把节点释放掉，否则队列会堵死。 */
+        if (!Queue_IsEmpty(&uart->tx_queue) &&
+            uart->huart->gState == HAL_UART_STATE_READY) {
+
+            Node* temp = Queue_Pop(&uart->tx_queue);
+            if (temp != NULL) {
+                if (HAL_UART_Transmit_DMA(uart->huart, (uint8_t*)temp->data, temp->len) != HAL_OK) {
+                    Queue_FreeNode(temp);          /* 发不出去就还回去，别卡住队列 */
+                } else {
+                    uart->status = UART_SENDING;   /* 仅用于观察 */
+                }
             }
         }
     }

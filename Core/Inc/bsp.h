@@ -66,6 +66,10 @@ extern DJI_MOTOR_DRIVES user_wheel_rr;
 
 /* 轮速 PID */
 #include "../../User_Algorithm/User_Controller/user_pid.h"
+
+/* PID 测试用波形发生器 */
+#include "../../User_Algorithm/user_waveform.h"
+extern WAVEFORM_DRIVES user_wave;
 extern PID_Controller user_wheel_pid_fl;
 extern PID_Controller user_wheel_pid_fr;
 extern PID_Controller user_wheel_pid_rl;

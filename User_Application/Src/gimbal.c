@@ -30,8 +30,19 @@ void Gimbal_Init(GIMBAL_DRIVES* gimbal, DJI_MOTOR_DRIVES* yaw_motor) {
     gimbal->max_w = GIMBAL_YAW_MAX_W;
     gimbal->world_kp = GIMBAL_WORLD_KP;
     gimbal->ff_gain = GIMBAL_FF_GAIN;
+    gimbal->target_rate = 0.0f;
     gimbal->last_dbus_count = 0;
     gimbal->dbus_offline_ms = 0;
+
+    /* PID 测试波形：默认关，参数给个安全初值 */
+    gimbal->wave_en = 0.0f;
+    gimbal->wave_type = (float)WAVE_SQUARE;
+    gimbal->wave_amp = GIMBAL_WAVE_AMP_DEF;
+    gimbal->wave_freq = GIMBAL_WAVE_FREQ_DEF;
+    gimbal->wave_duty = 0.5f;
+
+    Waveform_Init(&user_wave, GIMBAL_DT_S);
+    Gimbal_Wave_Apply();
     gimbal->imu_yaw = 0.0f;
     gimbal->target_speed = 0.0f;
 
@@ -125,8 +136,10 @@ static void Gimbal_Update(void* arg) {
 #if GIMBAL_LOCK_WORLD
     /* ★ 每个周期都积分（本任务固定 1kHz，DT = 1ms）
        摇杆不动时每周期加 stick*max_w*0.001*57.3 度，1 秒正好累到目标角速度 */
-    gimbal->target_yaw += stick * gimbal->max_w * GIMBAL_DT_S
-                        * RAD_TO_DEG * GIMBAL_YAW_DIR;
+    /* 摇杆角速度 deg/s：既是积分增量，也是外环的前馈量 */
+    gimbal->target_rate = stick * gimbal->max_w * RAD_TO_DEG * GIMBAL_YAW_DIR;
+
+    gimbal->target_yaw += gimbal->target_rate * GIMBAL_DT_S;
     gimbal->target_yaw = Gimbal_Wrap180(gimbal->target_yaw);
 #else
     /* 纯速度控制：推着匀速转、松杆主动刹车停在当前位置 */
@@ -154,23 +167,70 @@ static void Gimbal_Update(void* arg) {
 
     gimbal->yaw = Gimbal_Get_Yaw(gimbal);
 
+#if GIMBAL_WAVE_ENABLE
+    if (gimbal->wave_en > 0.5f) {
+        /* ★ PID 测试模式：方波直接当转速指令，绕过外环
+           这样串口绘图上的 gspd 就是电机对方波的响应，用来调 gimbal_kp / gimbal_ki */
+        gimbal->target_speed = Waveform_Update(&user_wave);
+        gimbal->yaw_motor->Set_Motor_State(gimbal->yaw_motor, gimbal->target_speed);
+        return;
+    }
+#endif
+
 #if GIMBAL_LOCK_WORLD
-    /* ★ 锁世界 = 位置环 + 底盘角速度前馈
-       位置环：让云台世界朝向追上 target_yaw
-       前馈：  底盘以 omega 自转时，云台必须相对底盘反向转同样角速度，
-               才能在世界系里不动 —— 这样云台才不会跟着底盘跑
-       两项都要乘 GIMBAL_YAW_DIR（它是"编码器角度增大"的转向系数）*/
+    /* ★ 锁世界 = 位置环 + 两路前馈
+       ① 底盘角速度前馈：底盘以 omega 自转时，云台须相对底盘反向转同样角速度，
+          才能在世界系里不动 —— 让云台不跟着底盘跑
+       ② 【摇杆前馈】：摇杆本来就知道"想转多快"，直接加上去，
+          外环就不用靠误差去"挣"转速 —— 消除跟踪斜坡输入的固有滞后
+          （这是"推摇杆时云台晃"的正解）
+       三项都带 GIMBAL_YAW_DIR，方向一致 */
     const float error = Gimbal_Wrap180(gimbal->target_yaw - gimbal->imu_yaw);
+
+    /* deg/s -> RPM：/360*60 = /6 */
+    const float rate_rpm = gimbal->target_rate * (1.0f / 6.0f);
 
     gimbal->target_speed = GIMBAL_YAW_DIR *
                            (gimbal->world_kp * error
-                            - user_chassis.omega * RAD_S_TO_RPM * gimbal->ff_gain);
+                            - user_chassis.omega * RAD_S_TO_RPM * gimbal->ff_gain)
+                           + rate_rpm;
 
     gimbal->yaw_motor->Set_Motor_State(gimbal->yaw_motor, gimbal->target_speed);
 #else
     /* 纯速度控制：直接把转速目标交给电机内置的速度环 */
     gimbal->yaw_motor->Set_Motor_State(gimbal->yaw_motor, gimbal->target_speed);
 #endif
+}
+
+/* 把 user_gimbal 里的波形参数写进 user_wave（在线改参数后调用） */
+void Gimbal_Wave_Apply(void) {
+    const int t = (int)user_gimbal.wave_type;
+
+    switch (t) {
+        case WAVE_STEP:
+            Waveform_Set_Step(&user_wave, -user_gimbal.wave_amp,
+                              user_gimbal.wave_amp, 0.5f);
+            break;
+        case WAVE_SINE:
+            Waveform_Set_Sine(&user_wave, user_gimbal.wave_amp,
+                              user_gimbal.wave_freq, 0.0f);
+            break;
+        case WAVE_TRIANGLE:
+            Waveform_Set_Triangle(&user_wave, user_gimbal.wave_amp,
+                                  user_gimbal.wave_freq, 0.0f);
+            break;
+        case WAVE_SAW:
+            Waveform_Set_Saw(&user_wave, user_gimbal.wave_amp,
+                             user_gimbal.wave_freq, 0.0f);
+            break;
+        case WAVE_SQUARE:
+        default:
+            Waveform_Set_Square(&user_wave, user_gimbal.wave_amp,
+                                user_gimbal.wave_freq, 0.0f, user_gimbal.wave_duty);
+            break;
+    }
+
+    Waveform_Set_Limit(&user_wave, -GIMBAL_WAVE_MAX_RPM, GIMBAL_WAVE_MAX_RPM);
 }
 
 /* 取 DBUS 指定通道 */
